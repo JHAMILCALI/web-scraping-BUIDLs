@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 from pathlib import Path
+import random
+import time
 
 from playwright.sync_api import sync_playwright
 
 URL = "https://dorahacks.io/hackathon/boring-ai/hackers"
 API_TEMPLATE = "https://dorahacks.io/api/hackathon/boring-ai/hackers/?page={page}&page_size={page_size}"
 OUTPUT_FILE = Path("hackers_buidl_submitted.txt")
+MIN_DELAY_SECONDS = 2.0
+MAX_DELAY_SECONDS = 5.0
+MAX_RETRIES = 3
+BLOCKING_STATUS_CODES = {403, 429}
 
 
 def _extract_username(item: dict) -> str | None:
@@ -21,6 +27,31 @@ def _extract_buidl_url(item: dict) -> str | None:
     if not buidl_id:
         return None
     return f"https://dorahacks.io/buidl/{buidl_id}"
+
+
+def _sleep_between_requests() -> None:
+    delay = random.uniform(MIN_DELAY_SECONDS, MAX_DELAY_SECONDS)
+    time.sleep(delay)
+
+
+def _fetch_page_with_backoff(page, api_url: str):
+    for attempt in range(1, MAX_RETRIES + 1):
+        _sleep_between_requests()
+        response = page.request.get(api_url, timeout=90_000)
+
+        if response.status == 200:
+            text = response.text()
+            if "Human Verification" in text:
+                return None
+            return response
+
+        if response.status in BLOCKING_STATUS_CODES and attempt < MAX_RETRIES:
+            backoff_seconds = 2 ** attempt
+            time.sleep(backoff_seconds)
+            continue
+
+        return None
+    return None
 
 
 def extract_hackers_with_submitted_buidl() -> list[tuple[str, str]]:
@@ -38,8 +69,8 @@ def extract_hackers_with_submitted_buidl() -> list[tuple[str, str]]:
 
         while True:
             api_url = API_TEMPLATE.format(page=page_number, page_size=page_size)
-            response = page.request.get(api_url, timeout=90_000)
-            if response.status != 200:
+            response = _fetch_page_with_backoff(page, api_url)
+            if response is None:
                 break
 
             payload = response.json()
